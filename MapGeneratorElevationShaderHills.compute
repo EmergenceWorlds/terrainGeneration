@@ -1,0 +1,77 @@
+#pragma kernel CSMain
+
+#include "TiledNoise.hlsl"
+#include "Interpolation.hlsl"
+#include "Selection.hlsl"
+
+RWStructuredBuffer<float> map;
+
+int mapSize;
+float scale;
+float heightFactor;
+
+float inputNoise;
+
+float erosionStrength;
+float erosionDetail;
+
+float factorX;
+float factorZ;
+int startPosX;
+int startPosZ;
+int limitSize;
+int2 offset;
+int2 offset2;
+
+int curveSize;
+
+#define PI 3.14159265358979
+
+float getHeight(int2 coordinateInt, float2 coordinateFloat, int index)
+{
+    float frequency = 1.0;
+
+    // calculate the base hill terrain at a rather low frequency
+    // turbulence for more realistic terrain
+    float2 coordinateIntHillBase = tiledTurbulence(coordinateInt, coordinateFloat, offset, limitSize, scale, 1.0, 0.0);
+    // low frequency noise for hill base
+    float valueBase = tiledNoiseFBMBillow(coordinateIntHillBase, coordinateFloat, offset, limitSize, scale, frequency, 4) * 0.5;
+
+    // generate river valleys with the turbulenced values from plains
+    float valueRiver = tiledNoiseFBMRidge(coordinateIntHillBase, coordinateFloat, offset, limitSize, scale, frequency / 1.0, 1) * 2.0;
+    // invert the rivers and scale them with smoothstep
+    valueRiver = 1.0 - valueRiver;
+    valueRiver = smoothstep(0.0, 1.0, valueRiver);
+
+    // lerp the hill base value with a 0 value controlled by the rivers to carve out river valleys
+    float valueBaseRiver = 0.0;
+    valueBaseRiver = lerp(0.0, valueRiver, valueBase);
+
+    // select hills based on continents elevation (only place hills on low continent elevation)
+    float value = selection(0.0, valueBaseRiver, inputNoise, 0.275, 0.35, 0.0375);
+
+    return value;
+}
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= mapSize || id.y >= mapSize) { return; }
+
+    int index = id.y * mapSize + id.x;
+
+    int xValueInt = (int)(id.x * floor(factorX));
+    int yValueInt = (int)(id.y * floor(factorZ));
+
+    float xValueFloat = id.x * frac(factorX);
+    float yValueFloat = id.y * frac(factorZ);
+
+    int2 coordinateInt = int2(xValueInt + startPosX, yValueInt + startPosZ);
+    float2 coordinateFloat = float2(xValueFloat, yValueFloat);
+
+    inputNoise = map[index];
+
+    float height = getHeight(coordinateInt, coordinateFloat, index);
+
+    map[index] += height * heightFactor;
+}

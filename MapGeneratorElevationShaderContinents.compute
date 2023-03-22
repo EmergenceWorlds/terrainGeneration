@@ -1,0 +1,84 @@
+#pragma kernel CSMain
+
+#include "TiledNoise.hlsl"
+#include "Interpolation.hlsl"
+#include "Selection.hlsl"
+
+RWStructuredBuffer<float> map;
+
+int curveSize;
+StructuredBuffer<float> height1Curve;
+
+int mapSize;
+float scale;
+float heightFactor;
+
+float heightFactor1;
+
+float erosionStrength;
+float erosionDetail;
+
+float factorX;
+float factorZ;
+int startPosX;
+int startPosZ;
+int limitSize;
+int2 offset;
+int2 offset2;
+
+#define PI 3.14159265358979
+
+float getHeight(int2 coordinateInt, float2 coordinateFloat)
+{
+    float frequency = 1.0;
+
+    // generate the base continents that are also getting modified by a curve to separate water and land nicely
+    // use 2 noises with same frequency and octaves but different offset to ensure more possible combinations with generation seeds
+    // add turbulence to create more realistic terrain
+    int2 coordinateIntBase1 = tiledTurbulence(coordinateInt, coordinateFloat, offset, limitSize, scale, 2.0, 0.25);
+    int2 coordinateIntBase2 = tiledTurbulence(coordinateInt, coordinateFloat, offset2, limitSize, scale, 2.0, 0.25);
+    float valueBase1 = tiledNoiseFBMCorrected(coordinateIntBase1, coordinateFloat, offset, limitSize, scale, frequency, 4, 0.5, 2.209);
+    float valueBase2 = tiledNoiseFBMCorrected(coordinateIntBase2, coordinateFloat, offset2, limitSize, scale, frequency, 4, 0.5, 2.209);
+    valueBase1 = evaluateCurveLinear(valueBase1, height1Curve, curveSize);
+    valueBase2 = evaluateCurveLinear(valueBase2, height1Curve, curveSize);
+    // take the mean value
+    float valueBase = (valueBase1 + valueBase2) / 2.0;
+
+    // add two additional higher frequency levels on top to generate more mountains on the map
+    frequency *= 2.0;
+    // but do a selection so that the additional HF value only gets added on areas above water
+    int2 coordinateIntHF = tiledTurbulence(coordinateInt, coordinateFloat, offset, limitSize, scale, 2.0, 0.2);
+    float valueHF1 = tiledNoiseFBMCorrected(coordinateIntHF, coordinateFloat, offset, limitSize, scale, frequency, 3, 0.5, 2.209);
+    float valueHF2 = tiledNoiseFBMCorrected(coordinateIntHF, coordinateFloat, offset2, limitSize, scale, frequency, 3, 0.5, 2.209);
+
+    valueHF2 *= 1.0 - valueHF1 * 2.0;
+    valueHF2 = clamp(valueHF2, 0.0, 1.0);
+    // scale it exponentially and by a factor of 0.5
+    float valueHF = pow(valueHF1 + valueHF2, 1.375) * 0.5;
+    // only let it appear above water and below very high mountains to not create values > 1 later on
+    valueHF = selection(0.0, valueHF, valueBase, 0.43, 0.58, 0.075);
+    valueHF = selection(valueHF, 0.0, valueBase, 0.58, 1.0, 0.075);
+
+    // just add both values together, scale them and return
+    return (valueBase + valueHF) * heightFactor1;
+}
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= mapSize || id.y >= mapSize) { return; }
+
+    int index = id.y * mapSize + id.x;
+
+    int xValueInt = (int)(id.x * floor(factorX));
+    int yValueInt = (int)(id.y * floor(factorZ));
+
+    float xValueFloat = id.x * frac(factorX);
+    float yValueFloat = id.y * frac(factorZ);
+
+    int2 coordinateInt = int2(xValueInt + startPosX, yValueInt + startPosZ);
+    float2 coordinateFloat = float2(xValueFloat, yValueFloat);
+
+    float height = getHeight(coordinateInt, coordinateFloat);
+    map[index] = height * heightFactor;
+}

@@ -1,0 +1,117 @@
+#pragma kernel CSMain
+
+#include "TiledNoise.hlsl"
+#include "Interpolation.hlsl"
+#include "Selection.hlsl"
+
+RWStructuredBuffer<float> map;
+
+int mapSize;
+float scale;
+float heightFactor;
+
+float inputNoise;
+
+float factorX;
+float factorZ;
+int startPosX;
+int startPosZ;
+int limitSize;
+int2 offset;
+int2 offset2;
+
+#define PI 3.14159265358979
+
+float getNoiseMask(int index, in int2 coordinateInt, in float2 coordinateFloat){
+    // evaluate a damping factor based on existing height - 
+    // zero in ocean and growing on land the heigher the existing terrain is
+    //float curveValue = evaluateCurveLinear(map[index], heightMaskCurve, curveSize);
+    //float inverseCurveValue = 1 - curveValue;
+
+    // a noise mask to filter out erosion mountains randomly
+    // on high mountainous terrain
+    float noiseMask = tiledNoiseFBMCorrected(coordinateInt, coordinateFloat, 0, limitSize, scale, 0.5, 2);
+
+    return noiseMask;
+}
+
+float getHeight(int2 coordinateInt, float2 coordinateFloat, int index)
+{
+    float frequency = 0.5;
+
+    // calculate the base mountain terrain at a rather low frequency
+    // turbulence the base for more realistic mountain shapes
+    float2 coordinateIntMountainBase = tiledTurbulence(coordinateInt, coordinateFloat, offset, limitSize, scale, 3.0, 0.3);
+    // low frequency noise for mountains base
+    float valueBase = tiledNoiseFBMRidge(coordinateIntMountainBase, coordinateFloat, offset, limitSize, scale, frequency, 4) * 3.0;
+
+    // generate river valleys with the turbulenced values from mountain
+    float valueRiver = tiledNoiseFBMRidge(coordinateIntMountainBase, coordinateFloat, offset, limitSize, scale, frequency / 1.0, 1) * 2.0;
+    // invert the rivers and scale them up
+    valueRiver = 1.0 - valueRiver;
+    valueRiver = smoothstep(0.2, 1.3, valueRiver);
+
+    // lerp the mountain base value with a 0 value controlled by the rivers to carve out river valleys
+    float valueBaseRiver = 0.0;
+    valueBaseRiver = lerp(0.0, valueBase, valueRiver);
+
+    // calculate higher frequency noise now for additional mountain detail
+    // but split it into high altitude mountains and lower altitude mountains
+
+    // first the high altitude
+    // turbulence for the High value
+    float2 coordinateIntHigh = tiledTurbulence(coordinateInt, coordinateFloat, offset, limitSize, scale, 2.0, 0.2);
+    // high frequency noise for mountains base
+    // use 2 noise values and combine them with max() to create more realistic and not too ridged looking terrain
+    float valueHigh1 = tiledNoiseFBMRidge(coordinateIntHigh, coordinateFloat, offset, limitSize, scale, frequency * 4.0, 5);
+    float valueHigh2 = tiledNoiseFBMRidge(coordinateIntHigh, coordinateFloat, offset + int2(100000, 100000), limitSize, scale, frequency * 4.0, 7);
+    // select HF noise only on high base Mountain values, lower mountain areas are less noisy then
+    float valueHigh = selection(0.0, max(valueHigh1, valueHigh2), valueBaseRiver, 0.25, 0.5, 0.125);
+    // scale the high frequency noise down
+    valueHigh *= 0.3;
+
+    // now the lower altitude
+    // turbulence for the Low value
+    float2 coordinateIntLow = tiledTurbulence(coordinateInt, coordinateFloat, offset2, limitSize, scale, 2.0, 0.2);
+    // high frequency noise for mountains base
+    float valueLow1 = tiledNoiseFBMRidge(coordinateIntLow, coordinateFloat, offset2, limitSize, scale, frequency * 4.0, 4);
+    float valueLow2 = tiledNoiseFBMRidge(coordinateIntLow, coordinateFloat, offset2 + int2(100000, 100000), limitSize, scale, frequency * 4.0, 6);
+    // select HF noise only on high base Mountain values, lower mountain areas are less noisy then
+    // use 2 noise values and combine them with multiplication to create more "cliffy" terrain
+    float valueLow = selection(0.0, valueLow1 * valueLow2, valueBaseRiver, 0.0, 0.25, 0.125);
+    // scale the high frequency noise down
+    valueLow *= 0.3;
+    
+    float value = valueBaseRiver + valueHigh + valueLow;
+
+    // add a glaciated effect with exponential decay
+    value = pow(abs((value + 1.0) / 2.0), 1.375) * 2.0 - 0.5;
+
+    // select mountains based on continents elevation (only place mountains on high continent elevation)
+    value = selection(0.0, value, inputNoise, 0.35, 0.425, 0.0375);
+
+    return value;
+}
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= mapSize || id.y >= mapSize) { return; }
+
+    int index = id.y * mapSize + id.x;
+
+    int xValueInt = (int)(id.x * floor(factorX));
+    int yValueInt = (int)(id.y * floor(factorZ));
+
+    float xValueFloat = id.x * frac(factorX);
+    float yValueFloat = id.y * frac(factorZ);
+
+    int2 coordinateInt = int2(xValueInt + startPosX, yValueInt + startPosZ);
+    float2 coordinateFloat = float2(xValueFloat, yValueFloat);
+
+    inputNoise = map[index];
+
+    float height = getHeight(coordinateInt, coordinateFloat, index);
+
+    map[index] += height * heightFactor;
+}
